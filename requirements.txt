@@ -1,9 +1,12 @@
-# Python dependencies installed into the venv by install.py (after mcp[cli]).
+# Runtime dependencies for the strict DaVinci Resolve MCP server.
 #
-# pyaaf2 — pure-Python AAF reader (MIT). Powers the advanced (Node) MCP's OFFLINE
-# AAF preview: editorial.parse_interchange (format "aaf") and list_sequences on a
-# .aaf, via server/aaf_probe.py. The installer points the advanced server's
-# AAF_PROBE_PYTHON at this venv so the reader is available out of the box. Without
-# it, AAF preview honest-refuses (it is never faked); live AAF import into Resolve
-# does not need it (Resolve reads AAF natively).
-pyaaf2>=1.7.0
+# The server imports FastMCP from the official MCP Python SDK and uses AnyIO
+# directly for strict LF-delimited stdio transport. Keep these dependencies
+# explicit so a clean virtualenv can start the server without relying on
+# packages installed as accidental transitive dependencies.
+mcp[cli]>=1.24.0,<2.0
+anyio>=4.8.0,<5.0
+
+# Pure-Python AAF reader used for offline AAF preview. Resolve's native AAF
+# import does not depend on it, but the MCP preview/probe path does.
+pyaaf2>=1.7.0,<2.0
