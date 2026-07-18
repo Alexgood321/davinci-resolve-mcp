@@ -4,7 +4,7 @@
 # directly for strict LF-delimited stdio transport. Keep these dependencies
 # explicit so a clean virtualenv can start the server without relying on
 # packages installed as accidental transitive dependencies.
-mcp[cli]>=1.24.0,<2.0
+mcp>=1.24.0,<2.0
 anyio>=4.8.0,<5.0
 
 # Pure-Python AAF reader used for offline AAF preview. Resolve's native AAF
