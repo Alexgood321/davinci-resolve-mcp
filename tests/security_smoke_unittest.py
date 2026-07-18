@@ -13,17 +13,37 @@ from src.utils.security_policy import (
     harden_prompt,
     install_strict_security_policy,
 )
+from src.utils.strict_ai_policy import install_strict_ai_policy
 
 
 class StrictOfflineSecurityTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         install_strict_security_policy()
+        install_strict_ai_policy()
 
     def test_updates_are_forced_off(self) -> None:
         self.assertEqual(os.environ.get("DAVINCI_RESOLVE_MCP_UPDATE_CHECK"), "0")
         self.assertEqual(os.environ.get("DAVINCI_RESOLVE_MCP_UPDATE_MODE"), "never")
         self.assertEqual(os.environ.get("DAVINCI_RESOLVE_MCP_AUTO_UPDATE"), "0")
+
+    def test_ai_model_ecosystems_are_forced_offline(self) -> None:
+        self.assertEqual(os.environ.get("DAVINCI_MCP_STRICT_AI_DISABLED"), "1")
+        self.assertEqual(os.environ.get("HF_HUB_OFFLINE"), "1")
+        self.assertEqual(os.environ.get("TRANSFORMERS_OFFLINE"), "1")
+        self.assertEqual(os.environ.get("HF_DATASETS_OFFLINE"), "1")
+
+    def test_embeddings_are_denied(self) -> None:
+        from src.utils import embeddings
+
+        with self.assertRaisesRegex(PermissionError, "STRICT_AI_DISABLED"):
+            embeddings.embed_texts(["untrusted media text"])
+
+    def test_media_analysis_execution_is_denied(self) -> None:
+        from src.utils import media_analysis
+
+        with self.assertRaisesRegex(PermissionError, "STRICT_AI_DISABLED"):
+            media_analysis.execute_plan_async({})
 
     def test_prompt_policy_is_prepended(self) -> None:
         prompt = harden_prompt("Describe the visible scene and return JSON.")
