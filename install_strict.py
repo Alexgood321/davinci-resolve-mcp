@@ -14,7 +14,6 @@ import os
 import re
 import shutil
 import stat
-import sys
 import tempfile
 import time
 import tomllib
@@ -44,7 +43,10 @@ def _venv_python() -> Path:
         candidate = ROOT / ".venv" / "Scripts" / "python.exe"
     else:
         candidate = ROOT / ".venv" / "bin" / "python"
-    candidate = candidate.resolve()
+
+    # Do not resolve the executable symlink. On macOS a venv Python commonly
+    # points at the framework interpreter; resolving it would make Codex bypass
+    # the venv and lose the project's installed dependencies.
     if not candidate.is_file():
         raise SystemExit(f"Strict venv Python not found: {candidate}")
     return candidate
