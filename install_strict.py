@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
-"""Strict-only installer for Codex.
+"""Hardened DaVinci Resolve MCP profile installer for Codex.
 
-This installer writes one managed MCP block to ``~/.codex/config.toml``.
-It never configures the upstream ``src/server.py`` entrypoint and refuses to
-create duplicate TOML tables. Existing configuration is backed up and the
-result is parsed with Python's TOML parser before being committed atomically.
+The installer manages two mutually exclusive MCP profiles in
+``~/.codex/config.toml``:
+
+- ``safe``: strict offline control with AI/media analysis disabled.
+- ``creative``: the same offline network and prompt-injection boundary, with
+  local media analysis, host_chat_paths, local transcription, edit_engine, and
+  timeline editing enabled.
+
+Both tables are retained in the config, but exactly one is enabled at a time.
+Existing configuration is backed up and validated with Python's TOML parser
+before being committed atomically.
 """
 from __future__ import annotations
 
@@ -18,19 +25,58 @@ import tempfile
 import time
 import tomllib
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parent
-STRICT_SERVER = (ROOT / "src" / "strict_server.py").resolve()
 DEFAULT_CONFIG = Path.home() / ".codex" / "config.toml"
-SERVER_NAME = "davinci_resolve_strict"
-BEGIN_MARKER = "# BEGIN DAVINCI_RESOLVE_MCP_STRICT"
-END_MARKER = "# END DAVINCI_RESOLVE_MCP_STRICT"
-MANAGED_PATTERN = re.compile(
-    rf"(?ms)^\s*{re.escape(BEGIN_MARKER)}\n.*?^\s*{re.escape(END_MARKER)}\s*\n?"
-)
-TABLE_PATTERN = re.compile(
-    rf"(?m)^\s*\[mcp_servers\.(?:{re.escape(SERVER_NAME)}|\"{re.escape(SERVER_NAME)}\")\]\s*$"
-)
+
+PROFILES: dict[str, dict[str, Any]] = {
+    "safe": {
+        "server_name": "davinci_resolve_strict",
+        "entrypoint": (ROOT / "src" / "strict_server.py").resolve(),
+        "begin_marker": "# BEGIN DAVINCI_RESOLVE_MCP_STRICT",
+        "end_marker": "# END DAVINCI_RESOLVE_MCP_STRICT",
+        "env": {
+            "DAVINCI_MCP_SECURITY_PROFILE": "safe",
+            "DAVINCI_RESOLVE_MCP_UPDATE_CHECK": "0",
+            "DAVINCI_RESOLVE_MCP_UPDATE_MODE": "never",
+            "DAVINCI_RESOLVE_MCP_AUTO_UPDATE": "0",
+            "HF_HUB_OFFLINE": "1",
+            "TRANSFORMERS_OFFLINE": "1",
+            "HF_DATASETS_OFFLINE": "1",
+            "TORCH_HOME": str((ROOT / ".strict-cache-disabled").resolve()),
+        },
+    },
+    "creative": {
+        "server_name": "davinci_resolve_creative",
+        "entrypoint": (ROOT / "src" / "creative_server.py").resolve(),
+        "begin_marker": "# BEGIN DAVINCI_RESOLVE_MCP_CREATIVE",
+        "end_marker": "# END DAVINCI_RESOLVE_MCP_CREATIVE",
+        "env": {
+            "DAVINCI_MCP_SECURITY_PROFILE": "creative",
+            "DAVINCI_RESOLVE_MCP_UPDATE_CHECK": "0",
+            "DAVINCI_RESOLVE_MCP_UPDATE_MODE": "never",
+            "DAVINCI_RESOLVE_MCP_AUTO_UPDATE": "0",
+            "HF_HUB_OFFLINE": "1",
+            "TRANSFORMERS_OFFLINE": "1",
+            "HF_DATASETS_OFFLINE": "1",
+        },
+    },
+}
+
+
+def _managed_pattern(profile: dict[str, Any]) -> re.Pattern[str]:
+    return re.compile(
+        rf"(?ms)^\s*{re.escape(profile['begin_marker'])}\n.*?"
+        rf"^\s*{re.escape(profile['end_marker'])}\s*\n?"
+    )
+
+
+def _table_pattern(server_name: str) -> re.Pattern[str]:
+    return re.compile(
+        rf"(?m)^\s*\[mcp_servers\.(?:{re.escape(server_name)}|"
+        rf"\"{re.escape(server_name)}\")\]\s*$"
+    )
 
 
 def _toml_string(value: str) -> str:
@@ -48,32 +94,26 @@ def _venv_python() -> Path:
     # points at the framework interpreter; resolving it would make Codex bypass
     # the venv and lose the project's installed dependencies.
     if not candidate.is_file():
-        raise SystemExit(f"Strict venv Python not found: {candidate}")
+        raise SystemExit(f"Hardened venv Python not found: {candidate}")
     return candidate
 
 
-def _managed_block(python_path: Path) -> str:
-    env = {
-        "DAVINCI_MCP_SECURITY_PROFILE": "safe",
-        "DAVINCI_RESOLVE_MCP_UPDATE_CHECK": "0",
-        "DAVINCI_RESOLVE_MCP_UPDATE_MODE": "never",
-        "DAVINCI_RESOLVE_MCP_AUTO_UPDATE": "0",
-        "HF_HUB_OFFLINE": "1",
-        "TRANSFORMERS_OFFLINE": "1",
-        "TORCH_HOME": str((ROOT / ".strict-cache-disabled").resolve()),
-    }
+def _managed_block(profile_name: str, python_path: Path, *, enabled: bool) -> str:
+    profile = PROFILES[profile_name]
+    server_name = profile["server_name"]
+    entrypoint = profile["entrypoint"]
     lines = [
-        BEGIN_MARKER,
-        f"[mcp_servers.{SERVER_NAME}]",
+        profile["begin_marker"],
+        f"[mcp_servers.{server_name}]",
         f"command = {_toml_string(str(python_path))}",
-        f"args = [{_toml_string(str(STRICT_SERVER))}]",
-        "enabled = true",
+        f"args = [{_toml_string(str(entrypoint))}]",
+        f"enabled = {'true' if enabled else 'false'}",
         "",
-        f"[mcp_servers.{SERVER_NAME}.env]",
+        f"[mcp_servers.{server_name}.env]",
     ]
-    for key, value in env.items():
-        lines.append(f"{key} = {_toml_string(value)}")
-    lines.extend([END_MARKER, ""])
+    for key, value in profile["env"].items():
+        lines.append(f"{key} = {_toml_string(str(value))}")
+    lines.extend([profile["end_marker"], ""])
     return "\n".join(lines)
 
 
@@ -84,19 +124,43 @@ def _read_existing(path: Path) -> str:
         return ""
 
 
-def _render(existing: str, block: str) -> str:
-    without_managed = MANAGED_PATTERN.sub("", existing)
-    if TABLE_PATTERN.search(without_managed):
-        raise SystemExit(
-            f"Refusing to create duplicate [mcp_servers.{SERVER_NAME}] table. "
-            "Remove or rename the unmanaged table first."
-        )
+def _render(existing: str, python_path: Path, active_profile: str) -> str:
+    without_managed = existing
+    for profile in PROFILES.values():
+        without_managed = _managed_pattern(profile).sub("", without_managed)
+
+    for profile in PROFILES.values():
+        server_name = profile["server_name"]
+        if _table_pattern(server_name).search(without_managed):
+            raise SystemExit(
+                f"Refusing to create duplicate [mcp_servers.{server_name}] table. "
+                "Remove or rename the unmanaged table first."
+            )
+
+    blocks = [
+        _managed_block(name, python_path, enabled=(name == active_profile))
+        for name in ("safe", "creative")
+    ]
+    managed = "\n".join(blocks)
     prefix = without_managed.rstrip()
-    rendered = f"{prefix}\n\n{block}" if prefix else block
+    rendered = f"{prefix}\n\n{managed}" if prefix else managed
     try:
-        tomllib.loads(rendered)
+        parsed = tomllib.loads(rendered)
     except tomllib.TOMLDecodeError as exc:
         raise SystemExit(f"Refusing to write invalid TOML: {exc}") from exc
+
+    enabled_profiles = [
+        name
+        for name, profile in PROFILES.items()
+        if parsed.get("mcp_servers", {})
+        .get(profile["server_name"], {})
+        .get("enabled") is True
+    ]
+    if enabled_profiles != [active_profile]:
+        raise SystemExit(
+            "Refusing to write ambiguous profile state: expected exactly "
+            f"{active_profile!r} enabled, got {enabled_profiles!r}"
+        )
     return rendered
 
 
@@ -125,17 +189,28 @@ def _atomic_write(path: Path, content: str) -> Path | None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Install strict DaVinci Resolve MCP for Codex")
+    parser = argparse.ArgumentParser(
+        description="Install or switch hardened DaVinci Resolve MCP profiles for Codex"
+    )
+    parser.add_argument(
+        "--profile",
+        choices=tuple(PROFILES),
+        default="safe",
+        help="Profile to enable; the other managed profile remains installed but disabled.",
+    )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
-    if not STRICT_SERVER.is_file():
-        raise SystemExit(f"strict_server.py not found: {STRICT_SERVER}")
+    for name, profile in PROFILES.items():
+        entrypoint = profile["entrypoint"]
+        if not entrypoint.is_file():
+            raise SystemExit(f"{name} entrypoint not found: {entrypoint}")
+
     python_path = _venv_python()
     config_path = args.config.expanduser().resolve()
     existing = _read_existing(config_path)
-    rendered = _render(existing, _managed_block(python_path))
+    rendered = _render(existing, python_path, args.profile)
 
     backup = None
     if not args.dry_run:
@@ -143,16 +218,25 @@ def main() -> None:
         # Re-read and validate the exact bytes that reached disk.
         tomllib.loads(config_path.read_text(encoding="utf-8"))
 
+    active = PROFILES[args.profile]
     result = {
         "success": True,
         "dry_run": bool(args.dry_run),
         "config_path": str(config_path),
         "backup_path": str(backup) if backup else None,
-        "server_name": SERVER_NAME,
+        "profile": args.profile,
+        "active_server_name": active["server_name"],
         "command": str(python_path),
-        "entrypoint": str(STRICT_SERVER),
-        "profile": "safe",
+        "entrypoint": str(active["entrypoint"]),
         "network": "blocked_by_runtime",
+        "managed_servers": {
+            name: {
+                "server_name": profile["server_name"],
+                "entrypoint": str(profile["entrypoint"]),
+                "enabled": name == args.profile,
+            }
+            for name, profile in PROFILES.items()
+        },
         "normal_server_configured": False,
     }
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
