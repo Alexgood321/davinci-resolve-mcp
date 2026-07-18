@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Fail-closed entrypoint for the hardened DaVinci Resolve MCP fork.
 
-This is the only supported MCP server entrypoint in strict-offline mode.  It
-installs the runtime security policy before importing or executing the upstream
-server module.
+This is the only supported MCP server entrypoint in strict-offline mode. It
+bootstraps the repository package path, installs the runtime security policy,
+and only then imports or executes the upstream server module.
 """
 from __future__ import annotations
 
@@ -12,7 +12,13 @@ import os
 import runpy
 import socket
 import subprocess
+import sys
 from pathlib import Path
+
+CURRENT_FILE = Path(__file__).resolve()
+PROJECT_ROOT = CURRENT_FILE.parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.utils.security_policy import install_strict_security_policy
 
@@ -72,5 +78,5 @@ def _probe() -> None:
 if os.environ.get("DAVINCI_MCP_STRICT_PROBE") == "1":
     _probe()
 
-server_path = Path(__file__).with_name("server.py")
+server_path = CURRENT_FILE.with_name("server.py")
 runpy.run_path(str(server_path), run_name="__main__")
